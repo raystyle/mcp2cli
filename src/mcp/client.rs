@@ -3418,6 +3418,7 @@ mod tests {
                     endpoint: Some(endpoint.to_owned()),
                     stdio: StdioServerConfig::default(),
                     protocol_version: None,
+                    headers: Default::default(),
                 },
                 defaults: DefaultsConfig::default(),
                 logging: LoggingConfig::default(),
@@ -3488,6 +3489,7 @@ mod tests {
             None,
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect_err("invalid endpoint should fail");
         assert!(
@@ -3505,6 +3507,7 @@ mod tests {
             Some("tok-abc".to_owned()),
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect("https endpoints should build");
     }
@@ -3517,6 +3520,7 @@ mod tests {
             None,
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect_err("non http(s) scheme should fail");
         assert!(
@@ -3586,6 +3590,7 @@ mod tests {
             Some("tok-abc".to_owned()),
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect("client should build");
         let session = client.session.lock().await.clone();
@@ -3616,6 +3621,7 @@ mod tests {
             None,
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect("client should build");
         let session = client.session.lock().await.clone();
@@ -3639,6 +3645,7 @@ mod tests {
             None,
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect("client should build");
 
@@ -4052,6 +4059,7 @@ mod tests {
             None,
             VersionPolicy::Auto,
             None,
+            Vec::new(),
         )
         .expect("client should build");
         let request = JsonRpcRequest::new(

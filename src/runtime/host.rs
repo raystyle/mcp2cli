@@ -1076,7 +1076,7 @@ fn print_shim_help(invoked_as: &str, server: &str, tool: &str, cache: &McpShimTo
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod shim_tests {
     use super::parse_tool_args;
     use std::ffi::OsString;

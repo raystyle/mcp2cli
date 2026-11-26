@@ -1119,15 +1119,16 @@ mod tests {
                 .config
         };
 
-        // mcp2cli's own users are opted in by default…
-        assert!(load(SERVER.to_owned()).telemetry.enabled);
-        // …a CLI published under another name is not…
+        // hvperv fork: 遥测默认关闭——
+        // mcp2cli's own users are opted OUT by default…
+        assert!(!load(SERVER.to_owned()).telemetry.enabled);
+        // …a CLI published under another name stays off…
         assert!(
             !load(format!("{SERVER}branding:\n  name: acme-mail\n"))
                 .telemetry
                 .enabled
         );
-        // …unless its publisher says so.
+        // …unless the user explicitly enables it.
         assert!(
             load(format!(
                 "{SERVER}branding:\n  name: acme-mail\ntelemetry:\n  enabled: true\n"
@@ -1185,7 +1186,7 @@ mod tests {
         };
         let branded_layout = layout.for_config(&branded, "email");
         assert_ne!(branded_layout.data_root, layout.data_root);
-        assert!(branded_layout.data_root.ends_with("acme-mail"));
+        assert!(branded_layout.data_root.to_string_lossy().contains("acme-mail")); // hvperv: Windows data_dir appends \data, ends_with would fail
         assert_ne!(
             branded_layout.token_store_path("email"),
             layout.token_store_path("email")

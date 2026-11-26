@@ -343,6 +343,7 @@ cargo test                      # 全部测试
 | 3 | **目录发现 Windows 化** | `RuntimeLayout` 无 `HOME` 时回退 `USERPROFILE` |
 | 4 | **新增 `server.headers` 静态头注入** | streamable HTTP 每请求最后注入,可覆盖默认头——用于 DNS-rebinding 防护服务器的 `Host` 钉扎与自定义鉴权头(上游只有 OAuth/bearer) |
 | 5 | **零 warning** | Unix-only 私有函数补 cfg 门,`cargo build` 干净 |
+| 6 | **遥测默认关闭** | 上游 `telemetry.enabled` 默认 true(上报到 telemetry.mcp2cli.dev);本 fork 默认 false,不做任何上报 |
 
 Windows 实测(2026-11-26):4 个 MCP 服务器端到端(能力发现 + 工具调用 + `--json` 输出),含 Bearer+Host 双注入的 windbg-mcp。
 
@@ -353,18 +354,6 @@ Windows 实测(2026-11-26):4 个 MCP 服务器端到端(能力发现 + 工具调
 - `link create` 用复制而非 symlink:升级 mcp2cli 后别名需要重建。
 
 ---
-
-## 遥测
-
-上游收集匿名使用遥测(不含服务器地址、工具名、参数值)。关闭方式任选其一:
-
-```bash
-# 配置文件(telemetry.enabled: false)
-# 环境变量
-export MCP2CLI_TELEMETRY=off
-# 或 CLI flag
-mcp2cli --no-telemetry ls
-```
 
 ## 许可
 

@@ -319,11 +319,16 @@ fn portability_warnings(source: &ResolvedAppConfig, config_file: &str) -> Vec<St
             "server.stdio.cwd ({cwd}) was not copied: it is a path on this machine."
         ));
     }
+    // hvperv: POSIX 绝对路径(/...)在 Windows 上 is_absolute()=false,会漏报;
+    // 双平台判定:本地 is_absolute 或以 / 或 \ 开头。
     let local_paths = stdio
         .command
         .iter()
         .chain(&stdio.args)
-        .filter(|value| Path::new(value).is_absolute())
+        .filter(|value| {
+            let v = value.as_str();
+            Path::new(v).is_absolute() || v.starts_with('/') || v.starts_with('\\')
+        })
         .cloned()
         .collect::<Vec<_>>();
     if !local_paths.is_empty() {

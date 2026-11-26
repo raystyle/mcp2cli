@@ -47,7 +47,8 @@ static TELEMETRY_DISABLED: OnceLock<bool> = OnceLock::new();
 /// Telemetry configuration from YAML config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TelemetryConfig {
-    /// Master switch. Default: true (opt-out model).
+    /// Master switch. hvperv: default false (fork 定调——不做任何上报;
+    /// 用户显式 `telemetry.enabled: true` 才开)。
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
@@ -74,7 +75,8 @@ impl Default for TelemetryConfig {
 }
 
 fn default_enabled() -> bool {
-    true
+    // hvperv: fork 默认关闭遥测(上游 opt-out 模型,默认上报)
+    false
 }
 
 /// Default collector URL — the tsok observability stack's dedicated
@@ -668,7 +670,7 @@ mod tests {
 
     #[test]
     fn disabled_by_env() {
-        let config = TelemetryConfig::default();
+        let config = TelemetryConfig { enabled: true, ..TelemetryConfig::default() };
         // SAFETY: test-only; tests run serially for env-var tests
         unsafe {
             std::env::set_var("MCP2CLI_TELEMETRY", "off");
@@ -690,7 +692,7 @@ mod tests {
 
     #[test]
     fn disabled_by_do_not_track() {
-        let config = TelemetryConfig::default();
+        let config = TelemetryConfig { enabled: true, ..TelemetryConfig::default() };
         // SAFETY: test-only
         unsafe {
             std::env::set_var("DO_NOT_TRACK", "1");
@@ -704,7 +706,7 @@ mod tests {
     #[test]
     fn records_to_local_file() {
         let tmp = TempDir::new().unwrap();
-        let config = TelemetryConfig::default();
+        let config = TelemetryConfig { enabled: true, ..TelemetryConfig::default() };
         // SAFETY: test-only
         unsafe {
             std::env::remove_var("MCP2CLI_TELEMETRY");
@@ -747,7 +749,7 @@ mod tests {
     #[test]
     fn first_run_only_once() {
         let tmp = TempDir::new().unwrap();
-        let config = TelemetryConfig::default();
+        let config = TelemetryConfig { enabled: true, ..TelemetryConfig::default() };
         // SAFETY: test-only
         unsafe {
             std::env::remove_var("MCP2CLI_TELEMETRY");
@@ -925,6 +927,7 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = TelemetryConfig {
+            enabled: true,
             endpoint: Some(format!("http://{addr}/v1/traces")),
             ..TelemetryConfig::default()
         };
@@ -988,6 +991,7 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = TelemetryConfig {
+            enabled: true,
             endpoint: Some(format!("http://{addr}/v1/traces")),
             ..TelemetryConfig::default()
         };
