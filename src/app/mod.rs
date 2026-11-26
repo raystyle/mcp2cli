@@ -432,6 +432,7 @@ fn build_adhoc_config(transport: &AdHocTransport) -> (AppConfig, String) {
                     endpoint: Some(url.clone()),
                     stdio: StdioServerConfig::default(),
                     protocol_version: None,
+                    headers: Default::default(),
                 },
                 ..AppConfig::default()
             };
@@ -461,6 +462,7 @@ fn build_adhoc_config(transport: &AdHocTransport) -> (AppConfig, String) {
                         env: env.iter().cloned().collect(),
                     },
                     protocol_version: None,
+                    headers: Default::default(),
                 },
                 ..AppConfig::default()
             };

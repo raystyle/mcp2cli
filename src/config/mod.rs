@@ -331,6 +331,10 @@ pub struct ServerConfig {
     /// (legacy handshake, skip the probe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<String>,
+    /// hvperv: extra static headers injected on every HTTP request
+    /// (auth / host pinning for DNS-rebinding-protected servers).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 impl ServerConfig {
@@ -367,6 +371,7 @@ impl Default for ServerConfig {
             endpoint: Some("https://demo.invalid/mcp".to_owned()),
             stdio: StdioServerConfig::default(),
             protocol_version: None,
+            headers: Default::default(),
         }
     }
 }
@@ -727,7 +732,9 @@ pub struct RuntimeLayout {
 impl RuntimeLayout {
     pub fn discover() -> Self {
         let project_dirs = ProjectDirs::from("org", "tsok", "mcp2cli");
+        // hvperv: Windows 无 HOME;依次 USERPROFILE → 当前目录
         let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
 

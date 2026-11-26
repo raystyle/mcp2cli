@@ -560,7 +560,16 @@ impl RuntimeHost {
         fs::create_dir_all(&link_dir)
             .with_context(|| format!("failed to create link directory: {}", link_dir.display()))?;
 
-        let link_path = link_dir.join(name);
+        // hvperv: Windows 可执行按 PATHEXT 解析,别名要带 .exe 才能直接调用
+        #[cfg(windows)]
+        let link_name = if name.to_ascii_lowercase().ends_with(".exe") {
+            name.to_owned()
+        } else {
+            format!("{name}.exe")
+        };
+        #[cfg(not(windows))]
+        let link_name = name.to_owned();
+        let link_path = link_dir.join(&link_name);
         if fs::symlink_metadata(&link_path).is_ok() {
             if !force {
                 return Err(anyhow!("link already exists: {}", link_path.display()));
@@ -581,10 +590,29 @@ impl RuntimeHost {
             })?;
         }
 
-        #[cfg(not(unix))]
+        // hvperv: Windows hardlink 跨盘失败(EXDEV);改为复制二进制。
+        // dispatch 按 argv[0] 的 file_stem 路由,复制件行为与 symlink 一致;
+        // 代价是 mcp2cli 升级后需重新 link(与 branded 发布件一致)。
+        #[cfg(windows)]
+        {
+            if link_path.exists() {
+                fs::remove_file(&link_path).with_context(|| {
+                    format!("failed to remove existing link: {}", link_path.display())
+                })?;
+            }
+            fs::copy(&target_path, &link_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    target_path.display(),
+                    link_path.display()
+                )
+            })?;
+        }
+
+        #[cfg(not(any(unix, windows)))]
         {
             return Err(anyhow!(
-                "link creation is currently only implemented on unix"
+                "link creation is not implemented on this platform"
             ));
         }
 
@@ -843,6 +871,14 @@ fn run_mcp_shim(
     // when the caller has a hand-built request body.
     let raw_pipe = forwarded_argv.iter().any(|a| a == OsStr::new("--ndjson"));
 
+    // hvperv: vsock_shim 是 Unix-only(VSOCK/UDS 直连桥);Windows 上 mcp-<server>-<tool>
+    // symlink shim 无意义,直接报不支持。
+    #[cfg(not(unix))]
+    {
+        let _ = (raw_pipe, server, tool);
+        Err(anyhow!("mcp shim dispatch requires unix (vsock/UDS); use the normal CLI instead"))
+    }
+    #[cfg(unix)]
     match crate::mcp::vsock_shim::target_from_env(server, cache.vsock_port) {
         Some(target) => {
             tracing::debug!(
@@ -899,6 +935,7 @@ fn run_mcp_shim(
 ///
 /// Bare positional args (no `=`, not `--json`) are rejected with a
 /// clear error so we never silently drop input.
+#[cfg(unix)]
 pub(crate) fn parse_tool_args(argv: &[std::ffi::OsString]) -> anyhow::Result<serde_json::Value> {
     use serde_json::{Map, Value};
     let mut map: Map<String, Value> = Map::new();
@@ -938,6 +975,7 @@ pub(crate) fn parse_tool_args(argv: &[std::ffi::OsString]) -> anyhow::Result<ser
     Ok(Value::Object(map))
 }
 
+#[cfg(unix)]
 fn read_json_arg(s: &std::ffi::OsStr) -> anyhow::Result<serde_json::Value> {
     let s = s
         .to_str()
@@ -950,6 +988,7 @@ fn read_json_arg(s: &std::ffi::OsStr) -> anyhow::Result<serde_json::Value> {
     serde_json::from_slice(&bytes).map_err(|e| anyhow!("--json parse: {e}"))
 }
 
+#[cfg(unix)]
 fn merge_object(
     into: &mut serde_json::Map<String, serde_json::Value>,
     body: serde_json::Value,
@@ -968,6 +1007,7 @@ fn merge_object(
     }
 }
 
+#[cfg(unix)]
 fn other_kind(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
@@ -983,6 +1023,7 @@ fn other_kind(v: &serde_json::Value) -> &'static str {
 /// Conservatively, only attempt JSON parse when the first char hints
 /// at a JSON literal — avoids surprising the user when their string
 /// happens to contain a colon or a brace.
+#[cfg(unix)]
 fn parse_value(s: &str) -> serde_json::Value {
     let looks_like_json = matches!(
         s.chars().next(),

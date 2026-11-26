@@ -217,6 +217,13 @@ pub async fn build_client(
                 bearer_token,
                 policy,
                 log_level,
+                config
+                    .config
+                    .server
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             )?;
             Ok(Box::new(match branded_client_info(config) {
                 Some((name, version)) => client.with_client_info(name, version),
@@ -345,6 +352,9 @@ pub struct StreamableHttpMcpClient {
     /// Bearer token injected as `Authorization: Bearer <token>` on every
     /// request when present (populated from the token store at build time).
     bearer_token: Option<String>,
+    /// hvperv: static headers from server.headers, injected verbatim on
+    /// every request (auth, Host pinning for DNS-rebinding-protected servers).
+    static_headers: Vec<(String, String)>,
 }
 
 /// The `clientInfo` a config's branding asks servers to see, if any.
@@ -885,6 +895,7 @@ impl StreamableHttpMcpClient {
         bearer_token: Option<String>,
         policy: VersionPolicy,
         log_level: Option<String>,
+        static_headers: Vec<(String, String)>,
     ) -> Result<Self> {
         let endpoint = Url::parse(&endpoint).map_err(|error| {
             anyhow!("invalid streamable HTTP endpoint '{}': {}", endpoint, error)
@@ -931,6 +942,7 @@ impl StreamableHttpMcpClient {
             session,
             next_request_id: Mutex::new(1),
             bearer_token,
+            static_headers,
         })
     }
 
@@ -1066,6 +1078,11 @@ impl StreamableHttpMcpClient {
         }
         if let Some(token) = &self.bearer_token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {}", token));
+        }
+        // hvperv: configured static headers (server.headers) — last word,
+        // so a pinned Host or custom auth header overrides defaults above.
+        for (name, value) in &self.static_headers {
+            builder = builder.header(name.as_str(), value.as_str());
         }
 
         let request = builder

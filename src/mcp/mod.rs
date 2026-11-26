@@ -29,4 +29,5 @@ pub mod client;
 pub mod handler;
 pub mod model;
 pub mod protocol;
+#[cfg(unix)]
 pub mod vsock_shim;

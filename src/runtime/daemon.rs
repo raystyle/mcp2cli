@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::config::RuntimeLayout;
@@ -43,6 +45,14 @@ impl RuntimeLayout {
 }
 
 /// Check if a daemon is running for the given config.
+// hvperv: Windows 无 Unix socket daemon,直接报无
+#[cfg(windows)]
+pub fn daemon_status(layout: &RuntimeLayout, config_name: &str) -> Result<Option<DaemonInfo>> {
+    let _ = (layout, config_name);
+    Ok(None)
+}
+
+#[cfg(unix)]
 pub fn daemon_status(layout: &RuntimeLayout, config_name: &str) -> Result<Option<DaemonInfo>> {
     let pid_path = layout.daemon_pid_path(config_name);
     if !pid_path.exists() {
@@ -66,6 +76,13 @@ pub fn daemon_status(layout: &RuntimeLayout, config_name: &str) -> Result<Option
 }
 
 /// Stop a running daemon by sending SIGTERM.
+#[cfg(windows)]
+pub fn stop_daemon(layout: &RuntimeLayout, config_name: &str) -> Result<bool> {
+    let _ = (layout, config_name);
+    Ok(false)
+}
+
+#[cfg(unix)]
 pub fn stop_daemon(layout: &RuntimeLayout, config_name: &str) -> Result<bool> {
     let info = match daemon_status(layout, config_name)? {
         Some(info) => info,
@@ -87,6 +104,7 @@ pub fn stop_daemon(layout: &RuntimeLayout, config_name: &str) -> Result<bool> {
 }
 
 /// Write the daemon info file.
+#[cfg(unix)]
 fn write_daemon_info(path: &Path, info: &DaemonInfo) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -97,6 +115,17 @@ fn write_daemon_info(path: &Path, info: &DaemonInfo) -> Result<()> {
 }
 
 /// Start the daemon main loop. This function runs forever until signaled.
+#[cfg(windows)]
+pub async fn run_daemon(
+    _layout: &RuntimeLayout,
+    _config_name: &str,
+    _mcp_client: std::sync::Arc<dyn crate::mcp::client::McpClient>,
+    _event_broker: crate::runtime::EventBroker,
+) -> Result<()> {
+    Err(anyhow!("daemon mode is not supported on Windows (requires Unix sockets)"))
+}
+
+#[cfg(unix)]
 pub async fn run_daemon(
     layout: &RuntimeLayout,
     config_name: &str,
@@ -198,6 +227,7 @@ pub async fn run_daemon(
 
 /// Handle a single client connection to the daemon.
 /// Protocol: client sends a JSON-encoded McpOperation, daemon returns a JSON-encoded result.
+#[cfg(unix)]
 async fn handle_daemon_client(
     stream: UnixStream,
     config_name: &str,
@@ -262,6 +292,15 @@ async fn handle_daemon_client(
 }
 
 /// Connect to a running daemon and send an operation.
+#[cfg(windows)]
+pub async fn daemon_perform(
+    _socket_path: &Path,
+    _operation: &crate::mcp::model::McpOperation,
+) -> Result<crate::mcp::model::McpOperationResult> {
+    Err(anyhow!("daemon mode is not supported on Windows"))
+}
+
+#[cfg(unix)]
 pub async fn daemon_perform(
     socket_path: &Path,
     operation: &crate::mcp::model::McpOperation,
@@ -291,15 +330,8 @@ pub async fn daemon_perform(
     serde_json::from_value(value).map_err(|e| anyhow!("failed to parse daemon response: {}", e))
 }
 
+#[cfg(unix)]
 fn is_process_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // kill(pid, 0) checks if the process exists
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
+    // kill(pid, 0) checks if the process exists
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }

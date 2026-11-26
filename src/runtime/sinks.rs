@@ -85,13 +85,16 @@ impl EventSink for HttpWebhookSink {
 
 // ---------------------------------------------------------------------------
 // Unix Domain Socket Sink — writes newline-delimited JSON to a UDS
+// hvperv: Windows 下 UDS 不可用(tokio 无 UnixStream),提供桩
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 pub struct UnixSocketSink {
     path: String,
     runtime: tokio::runtime::Handle,
 }
 
+#[cfg(unix)]
 impl UnixSocketSink {
     pub fn new(path: String) -> Self {
         Self {
@@ -101,6 +104,7 @@ impl UnixSocketSink {
     }
 }
 
+#[cfg(unix)]
 impl EventSink for UnixSocketSink {
     fn emit(&self, event: &RuntimeEvent) {
         let mut line = match serde_json::to_vec(event) {
@@ -124,6 +128,23 @@ impl EventSink for UnixSocketSink {
                 }
             }
         });
+    }
+}
+
+#[cfg(windows)]
+pub struct UnixSocketSink;
+
+#[cfg(windows)]
+impl UnixSocketSink {
+    pub fn new(_path: String) -> Self {
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl EventSink for UnixSocketSink {
+    fn emit(&self, _event: &RuntimeEvent) {
+        // hvperv: Windows 无 UDS;事件走其它 sink(stderr/http/sse)
     }
 }
 
@@ -315,6 +336,7 @@ mod tests {
         assert!(json.contains("\"app_id\":\"test\""));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unix_socket_sink_constructs_without_existing_socket() {
         let _sink = UnixSocketSink::new("/tmp/nonexistent-test-socket.sock".to_owned());
