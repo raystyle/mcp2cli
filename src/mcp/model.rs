@@ -19,6 +19,12 @@ use serde_json::Value;
 pub enum TransportKind {
     Stdio,
     StreamableHttp,
+    /// Legacy HTTP+SSE dual-channel transport (MCP 2024-11-05):
+    /// a long-lived GET SSE stream carries all server→client messages;
+    /// client→server requests are POSTed to the endpoint the server
+    /// announces in the `endpoint` event. hvperv: added for servers that
+    /// never migrated to Streamable HTTP (e.g. electron-debugger's /sse).
+    LegacySse,
 }
 
 impl TransportKind {
@@ -26,6 +32,7 @@ impl TransportKind {
         match self {
             Self::Stdio => "stdio",
             Self::StreamableHttp => "streamable_http",
+            Self::LegacySse => "legacy_sse",
         }
     }
 }

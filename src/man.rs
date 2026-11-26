@@ -164,6 +164,16 @@ workflow subcommands.",
                 );
             }
         }
+        TransportKind::LegacySse => {
+            let endpoint = ctx.config.server.endpoint.as_deref().unwrap_or("(not set)");
+            ln(
+                &mut out,
+                &format!(
+                    "Transport: Legacy HTTP+SSE (MCP 2024-11-05).  Endpoint: \\fI{}\\fR.",
+                    esc(endpoint)
+                ),
+            );
+        }
     }
 
     // ---- GLOBAL OPTIONS -----------------------------------------------------

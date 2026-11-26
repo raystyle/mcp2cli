@@ -199,6 +199,7 @@ impl AppConfig {
             TransportKind::StreamableHttp => {
                 endpoint.or_else(|| Some("https://demo.invalid/mcp".to_owned()))
             }
+            TransportKind::LegacySse => endpoint,
         };
         if matches!(transport, TransportKind::Stdio) {
             config.server.stdio.command = stdio_command;
@@ -354,6 +355,18 @@ impl ServerConfig {
             {
                 return Err(anyhow!(
                     "server.endpoint must be set for streamable_http transport"
+                ));
+            }
+            TransportKind::LegacySse
+                if self
+                    .endpoint
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty() =>
+            {
+                return Err(anyhow!(
+                    "server.endpoint must be set for legacy_sse transport"
                 ));
             }
             TransportKind::Stdio => self.stdio.validate()?,

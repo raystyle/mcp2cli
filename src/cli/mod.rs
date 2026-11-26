@@ -225,6 +225,9 @@ pub struct ConfigInitArgs {
 pub enum ConfigTransportArg {
     Stdio,
     StreamableHttp,
+    /// Legacy HTTP+SSE dual-channel transport (MCP 2024-11-05).
+    #[value(name = "legacy-sse")]
+    LegacySse,
 }
 
 impl From<ConfigTransportArg> for TransportKind {
@@ -232,6 +235,7 @@ impl From<ConfigTransportArg> for TransportKind {
         match value {
             ConfigTransportArg::Stdio => TransportKind::Stdio,
             ConfigTransportArg::StreamableHttp => TransportKind::StreamableHttp,
+            ConfigTransportArg::LegacySse => TransportKind::LegacySse,
         }
     }
 }
@@ -424,7 +428,7 @@ pub fn configs_list_output(configs: &[NamedConfigSummary]) -> CommandOutput {
 
 pub fn config_show_output(config: &ResolvedAppConfig) -> CommandOutput {
     let server_lines = match config.config.server.transport {
-        TransportKind::StreamableHttp => vec![format!(
+        TransportKind::StreamableHttp | TransportKind::LegacySse => vec![format!(
             "endpoint: {}",
             config
                 .config

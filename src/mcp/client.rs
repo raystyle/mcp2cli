@@ -164,6 +164,7 @@ enum ClientMode {
     Demo,
     Stdio,
     StreamableHttp,
+    LegacySse,
 }
 
 pub async fn build_client(
@@ -213,6 +214,33 @@ pub async fn build_client(
                 config.name.clone(),
                 config.config.server.endpoint.clone().ok_or_else(|| {
                     anyhow!("server.endpoint must be set for streamable HTTP transport")
+                })?,
+                bearer_token,
+                policy,
+                log_level,
+                config
+                    .config
+                    .server
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            )?;
+            Ok(Box::new(match branded_client_info(config) {
+                Some((name, version)) => client.with_client_info(name, version),
+                None => client,
+            }))
+        }
+        ClientMode::LegacySse => {
+            let config =
+                config.ok_or_else(|| anyhow!("missing config for legacy SSE MCP client"))?;
+            let bearer_token = load_bearer_token(layout, config).await;
+            let policy = VersionPolicy::parse(config.config.server.protocol_version.as_deref())?;
+            let log_level = load_server_log_level(layout, config).await;
+            let client = LegacySseMcpClient::new(
+                config.name.clone(),
+                config.config.server.endpoint.clone().ok_or_else(|| {
+                    anyhow!("server.endpoint must be set for legacy_sse transport")
                 })?,
                 bearer_token,
                 policy,
@@ -291,6 +319,7 @@ fn select_client_mode(config: Option<&ResolvedAppConfig>) -> ClientMode {
                 ClientMode::StreamableHttp
             }
         }
+        TransportKind::LegacySse => ClientMode::LegacySse,
     }
 }
 
@@ -355,6 +384,356 @@ pub struct StreamableHttpMcpClient {
     /// hvperv: static headers from server.headers, injected verbatim on
     /// every request (auth, Host pinning for DNS-rebinding-protected servers).
     static_headers: Vec<(String, String)>,
+}
+
+// ---------------------------------------------------------------------------
+// hvperv: Legacy HTTP+SSE dual-channel client (MCP 2024-11-05) — the
+// transport the official TypeScript SDK still ships as SSEClientTransport.
+//
+// Wire model (verified against a live 2024-11-05 server):
+//   1. GET <endpoint> (Accept: text/event-stream) — a long-lived stream.
+//   2. The server's first SSE event is `endpoint: <path>` announcing the
+//      POST address (usually relative; resolve against the GET URL and
+//      reject cross-origin, same as the official client).
+//   3. Every client→server message is POSTed to that address (202 on
+//      accept); every server→client message (JSON-RPC responses,
+//      notifications, server requests) arrives on the GET stream.
+//
+// Single-process design: the GET stream body is held in the client
+// (`stream` field); `await_response` reads frames directly from it —
+// no cross-task plumbing. One client = one connection, which matches
+// how a CLI actually uses a server (one command, one conversation).
+// ---------------------------------------------------------------------------
+#[derive(Debug)]
+pub struct LegacySseMcpClient {
+    config_name: String,
+    endpoint: Url,
+    client: HyperClient<HttpsConnector<HttpConnector>, Full<Bytes>>,
+    protocol: ProtocolEngine,
+    session: Mutex<McpClientSession>,
+    next_request_id: Mutex<u64>,
+    bearer_token: Option<String>,
+    static_headers: Vec<(String, String)>,
+    /// POST address announced by the server; set by `connect`.
+    post_endpoint: Mutex<Option<Url>>,
+    /// The long-lived GET response body. `None` until `connect`.
+    stream: Mutex<Option<hyper::body::Incoming>>,
+}
+
+impl LegacySseMcpClient {
+    pub fn new(
+        config_name: String,
+        endpoint: String,
+        bearer_token: Option<String>,
+        policy: VersionPolicy,
+        log_level: Option<String>,
+        static_headers: Vec<(String, String)>,
+    ) -> Result<Self> {
+        let endpoint = Url::parse(&endpoint)
+            .map_err(|error| anyhow!("invalid legacy SSE endpoint '{}': {}", endpoint, error))?;
+        if !matches!(endpoint.scheme(), "http" | "https") {
+            return Err(anyhow!(
+                "legacy SSE endpoint must use http or https; got '{}'",
+                endpoint.scheme()
+            ));
+        }
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(crate::tls::client_config())
+            .https_or_http()
+            .enable_http1()
+            .build();
+        let client = HyperClient::builder(TokioExecutor::new()).build(connector);
+        let protocol = ProtocolEngine::new(
+            DEFAULT_MCP_PROTOCOL_VERSION,
+            "mcp2cli",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .with_policy(policy)
+        .with_log_level(log_level);
+        let session = Mutex::new(protocol.initial_session());
+        Ok(Self {
+            config_name,
+            endpoint,
+            client,
+            protocol,
+            session,
+            next_request_id: Mutex::new(1),
+            bearer_token,
+            static_headers,
+            post_endpoint: Mutex::new(None),
+            stream: Mutex::new(None),
+        })
+    }
+
+    /// Introduce this client to the server as `name` `version`.
+    pub fn with_client_info(mut self, name: String, version: String) -> Self {
+        self.protocol = self.protocol.with_client_info(name, version);
+        self
+    }
+
+    fn endpoint_display(&self) -> String {
+        self.endpoint.as_str().to_owned()
+    }
+
+    async fn allocate_request_id(&self) -> u64 {
+        let mut next = self.next_request_id.lock().await;
+        let id = *next;
+        *next += 1;
+        id
+    }
+
+    fn auth_headers(&self, mut builder: http::request::Builder) -> http::request::Builder {
+        if let Some(token) = &self.bearer_token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {}", token));
+        }
+        for (name, value) in &self.static_headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        builder
+    }
+
+    /// Open the GET SSE stream, wait for the `endpoint` event, and stash
+    /// the resolved POST address + live body. Idempotent.
+    async fn connect(&self, app_id: &str, events: &EventBroker) -> Result<()> {
+        if self.post_endpoint.lock().await.is_some() {
+            return Ok(());
+        }
+
+        events.emit(RuntimeEvent::Info {
+            app_id: app_id.to_owned(),
+            message: format!(
+                "connecting legacy SSE stream to '{}'",
+                self.endpoint_display()
+            ),
+        });
+
+        let builder = self
+            .auth_headers(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(self.endpoint.as_str().to_owned())
+                    .header(header::ACCEPT, "text/event-stream"),
+            );
+        let request = builder
+            .body(Full::new(Bytes::new()))
+            .map_err(|error| anyhow!("failed to build legacy SSE GET: {}", error))?;
+        let response = self
+            .client
+            .request(request)
+            .await
+            .map_err(|error| anyhow!("legacy SSE GET failed: {}", error))?;
+        let status = response.status();
+        if status != StatusCode::OK {
+            return Err(anyhow!(
+                "legacy SSE endpoint returned HTTP {} (expected 200 with text/event-stream)",
+                status
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        if !content_type.starts_with("text/event-stream") {
+            return Err(anyhow!(
+                "legacy SSE endpoint content-type is '{}', not text/event-stream — \
+                 this server is probably not an MCP 2024-11-05 SSE server \
+                 (try transport: streamable-http)",
+                content_type
+            ));
+        }
+
+        // Read events until the `endpoint` announcement.
+        let mut body = response.into_body();
+        let mut buffer = String::new();
+        let mut announced: Option<Url> = None;
+        let post_endpoint = loop {
+            let Some(frame) = body.frame().await else {
+                return Err(anyhow!(
+                    "legacy SSE stream ended before the endpoint event"
+                ));
+            };
+            let frame =
+                frame.map_err(|error| anyhow!("legacy SSE stream read failed: {}", error))?;
+            if let Some(data) = frame.data_ref() {
+                buffer.push_str(&String::from_utf8_lossy(data).replace("\r\n", "\n"));
+            }
+            while let Some(boundary) = buffer.find("\n\n") {
+                let event = buffer[..boundary].to_owned();
+                buffer.replace_range(..boundary + 2, "");
+                let mut event_name: Option<String> = None;
+                let mut data_lines: Vec<String> = Vec::new();
+                for line in event.lines() {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        event_name = Some(rest.trim().to_owned());
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        data_lines.push(rest.trim_start().to_owned());
+                    }
+                }
+                if event_name.as_deref() != Some("endpoint") {
+                    continue;
+                }
+                let data = data_lines.join("\n");
+                // Official client resolves relative against the GET URL and
+                // rejects cross-origin.
+                let url = self
+                    .endpoint
+                    .join(&data)
+                    .map_err(|error| anyhow!("bad endpoint event '{}': {}", data, error))?;
+                if url.origin() != self.endpoint.origin() {
+                    return Err(anyhow!(
+                        "endpoint origin does not match connection origin: {} vs {}",
+                        url.origin().ascii_serialization(),
+                        self.endpoint.origin().ascii_serialization()
+                    ));
+                }
+                announced = Some(url);
+                break;
+            }
+            if let Some(url) = announced {
+                break url;
+            }
+        };
+
+        *self.post_endpoint.lock().await = Some(post_endpoint.clone());
+        *self.stream.lock().await = Some(body);
+
+        events.emit(RuntimeEvent::Info {
+            app_id: app_id.to_owned(),
+            message: format!(
+                "legacy SSE stream up; POST endpoint announced as '{}'",
+                post_endpoint
+            ),
+        });
+        Ok(())
+    }
+
+    /// POST one JSON-RPC message to the announced endpoint.
+    async fn post_message(&self, message: &Value) -> Result<()> {
+        let post = {
+            let guard = self.post_endpoint.lock().await;
+            guard
+                .clone()
+                .ok_or_else(|| anyhow!("legacy SSE connection not established"))?
+        };
+        let bytes = serde_json::to_vec(message)
+            .map_err(|error| anyhow!("failed to serialize JSON-RPC message: {}", error))?;
+        let builder = self.auth_headers(
+            Request::builder()
+                .method(Method::POST)
+                .uri(post.as_str().to_owned())
+                .header(header::CONTENT_TYPE, "application/json"),
+        );
+        let request = builder
+            .body(Full::new(Bytes::from(bytes)))
+            .map_err(|error| anyhow!("failed to build legacy SSE POST: {}", error))?;
+        let response = self
+            .client
+            .request(request)
+            .await
+            .map_err(|error| anyhow!("legacy SSE POST failed: {}", error))?;
+        // 202 Accepted is the norm; some servers answer 200/204.
+        if !matches!(
+            response.status(),
+            StatusCode::ACCEPTED | StatusCode::OK | StatusCode::NO_CONTENT
+        ) {
+            return Err(anyhow!(
+                "legacy SSE POST returned HTTP {}",
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Read one SSE event from the held stream as (event_name, data).
+    /// Returns Err when the stream ends.
+    async fn next_stream_event(&self, buffer: &mut String) -> Result<(String, String)> {
+        let mut guard = self.stream.lock().await;
+        let body = guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("legacy SSE stream not connected"))?;
+        loop {
+            while let Some(boundary) = buffer.find("\n\n") {
+                let event = buffer[..boundary].to_owned();
+                buffer.replace_range(..boundary + 2, "");
+                let mut event_name = String::from("message");
+                let mut data_lines: Vec<String> = Vec::new();
+                for line in event.lines() {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        event_name = rest.trim().to_owned();
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        data_lines.push(rest.trim_start().to_owned());
+                    }
+                }
+                return Ok((event_name, data_lines.join("\n")));
+            }
+            let Some(frame) = body.frame().await else {
+                return Err(anyhow!("legacy SSE stream ended"));
+            };
+            let frame =
+                frame.map_err(|error| anyhow!("legacy SSE stream read failed: {}", error))?;
+            if let Some(data) = frame.data_ref() {
+                buffer.push_str(&String::from_utf8_lossy(data).replace("\r\n", "\n"));
+            }
+        }
+    }
+
+    /// Wait for the JSON-RPC response with this id on the GET stream.
+    /// Notifications en route are logged; server requests are logged
+    /// unanswerable (CLI mode — same posture as the streamable SSE parser).
+    async fn await_response(&self, id: &JsonRpcId, handler: &OperationMessageHandler) -> Result<JsonRpcResponse> {
+        let want = match id {
+            JsonRpcId::Number(n) => n.to_string(),
+            JsonRpcId::String(s) => s.clone(),
+        };
+        let mut buffer = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        loop {
+            let (event_name, data) = tokio::time::timeout_at(
+                deadline,
+                self.next_stream_event(&mut buffer),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!("timed out waiting for the response on the legacy SSE stream")
+            })??;
+            if event_name != "message" {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(&data) else {
+                continue;
+            };
+            let has_method = value.get("method").is_some();
+            let has_id = value.get("id").is_some();
+            if has_method && !has_id {
+                let method = value["method"].as_str().unwrap_or("").to_owned();
+                tracing::debug!(method = %method, "legacy SSE server notification");
+                handler.handle_notification(&method, value.get("params"));
+                continue;
+            }
+            if has_method && has_id {
+                tracing::debug!(
+                    method = value["method"].as_str().unwrap_or(""),
+                    "legacy SSE server request (not answerable in CLI mode)"
+                );
+                continue;
+            }
+            if has_id && (value.get("result").is_some() || value.get("error").is_some()) {
+                let response: JsonRpcResponse = serde_json::from_value(value).map_err(|error| {
+                    anyhow!("bad JSON-RPC response on SSE stream: {}", error)
+                })?;
+                let got = match &response.id {
+                    JsonRpcId::Number(n) => n.to_string(),
+                    JsonRpcId::String(s) => s.clone(),
+                };
+                if got == want {
+                    return Ok(response);
+                }
+                // Response to another id (stale/unknown) — keep scanning.
+            }
+        }
+    }
 }
 
 /// The `clientInfo` a config's branding asks servers to see, if any.
@@ -2390,6 +2769,98 @@ impl McpClient for DemoMcpClient {
                 ))
             }
         }
+    }
+}
+
+#[async_trait]
+impl McpClient for LegacySseMcpClient {
+    async fn metadata(&self, app_id: &str) -> Result<ConnectionMetadata> {
+        let session = self.session.lock().await;
+        let server_name = session
+            .server_info
+            .as_ref()
+            .map(|value| value.name.clone())
+            .or_else(|| self.endpoint.host_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| "remote-mcp-server".to_owned());
+        let server_version = session
+            .server_info
+            .as_ref()
+            .map(|value| value.version.clone())
+            .unwrap_or_else(|| "unknown".to_owned());
+        Ok(ConnectionMetadata {
+            app_id: app_id.to_owned(),
+            server_name,
+            server_version,
+            transport: TransportKind::LegacySse,
+        })
+    }
+
+    async fn negotiated_session(&self) -> Option<McpClientSession> {
+        let session = self.session.lock().await;
+        session.initialized.then(|| session.clone())
+    }
+
+    async fn perform(
+        &self,
+        app_id: &str,
+        operation: McpOperation,
+        events: &EventBroker,
+        inventory_stale_path: Option<&PathBuf>,
+    ) -> Result<McpOperationResult> {
+        let handler = OperationMessageHandler {
+            app_id: app_id.to_owned(),
+            events: events.clone(),
+            inventory_stale_path: inventory_stale_path.cloned(),
+            roots: Vec::new(),
+        };
+
+        // Legacy SSE servers predate the modern probe; the transport kind
+        // in the config *is* the era decision — go straight to the
+        // initialize handshake on first use.
+        self.connect(app_id, events).await?;
+
+        let request_id = self.allocate_request_id().await;
+        let prepared = {
+            let session = self.session.lock().await;
+            self.protocol
+                .prepare_operation(&session, request_id, &operation)?
+        };
+
+        events.emit(RuntimeEvent::Info {
+            app_id: app_id.to_owned(),
+            message: format!(
+                "selected legacy SSE client for '{}' at '{}' with {} prepared message(s)",
+                self.config_name,
+                self.endpoint_display(),
+                prepared.outbound_message_count(),
+            ),
+        });
+
+        if let Some(initialize) = &prepared.initialize {
+            self.post_message(&serde_json::to_value(initialize)?).await?;
+            let response = self.await_response(&initialize.id, &handler).await?;
+            let initialize_result: InitializeResult = response.into_result()?;
+            {
+                let mut session = self.session.lock().await;
+                self.protocol
+                    .complete_initialize(&mut session, initialize_result, None);
+            }
+            if let Some(notification) = &prepared.initialized_notification {
+                let message = serde_json::to_value(notification)?;
+                // Notifications get no response on the stream; a 202 POST
+                // is the only ack.
+                self.post_message(&message).await?;
+            }
+        }
+
+        // Serialize requests against the single GET stream: hold the
+        // stream lock for the whole request/response cycle by posting and
+        // awaiting inline (next_stream_event locks internally; there is no
+        // interleaving hazard because await_response is the only reader).
+        let message = serde_json::to_value(&prepared.request)?;
+        self.post_message(&message).await?;
+        let response = self.await_response(&prepared.request.id, &handler).await?;
+        map_streamable_http_response(&operation, response)
     }
 }
 

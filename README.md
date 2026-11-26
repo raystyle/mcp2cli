@@ -344,14 +344,14 @@ cargo test                      # 全部测试
 | 4 | **新增 `server.headers` 静态头注入** | streamable HTTP 每请求最后注入,可覆盖默认头——用于 DNS-rebinding 防护服务器的 `Host` 钉扎与自定义鉴权头(上游只有 OAuth/bearer) |
 | 5 | **零 warning** | Unix-only 私有函数补 cfg 门,`cargo build` 干净 |
 | 6 | **遥测默认关闭** | 上游 `telemetry.enabled` 默认 true(上报到 telemetry.mcp2cli.dev);本 fork 默认 false,不做任何上报(用户显式开启才报) |
-| 7 | **Windows 测试修复** | `package.rs` 的 POSIX 绝对路径在 Windows `is_absolute()=false` 漏报(补 `/`、`\` 前缀判定);config 测试 branded data_dir 断言 `ends_with`→`contains`;`cargo test --lib` 200 全过 |
+| 7 | **Windows 测试修复** | `package.rs` 的 POSIX 绝对路径在 Windows `is_absolute()=false` 漏报(补 `/`、`\` 前缀判定);config 测试 branded data_dir 断言 `ends_with`→`contains`;`cargo test --lib` 200 全过 |`n| 8 | **新增 `legacy-sse` transport** | MCP 2024-11-05 HTTP+SSE 双通道客户端(官方 TS SDK 保留的 SSEClientTransport 形态):GET 流承载全部服务器→客户端消息,`endpoint` 事件通告 POST 地址,拒绝跨源;`--transport legacy-sse` 启用 |
 
 Windows 实测(2026-11-26):4 个 MCP 服务器端到端(能力发现 + 工具调用 + `--json` 输出),含 Bearer+Host 双注入的 windbg-mcp;`cargo test --lib` 200 用例全过、构建零 warning。
 
 ### 已知限制
 
 - **daemon 模式**仅在 Unix 可用(Windows 调用返回 "not supported";每次直连的开销可接受)。
-- **legacy SSE-only transport**(MCP 2024-11-05 形态,如 electron-debugger 的 `/sse` 端点)不兼容——只支持 streamable HTTP。
+- (已支持) **legacy SSE transport**(MCP 2024-11-05 形态,如 electron-debugger 的 `/sse` 端点):`--transport legacy-sse`,按官方 TypeScript SDK 的 SSEClientTransport 语义实现(GET 流承载全部服务器→客户端消息,endpoint 事件通告 POST 地址,拒绝跨源)。
 - `link create` 用复制而非 symlink:升级 mcp2cli 后别名需要重建。
 
 ---

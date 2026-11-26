@@ -211,7 +211,7 @@ pub fn init_package(
         // Login is the one built-in most published CLIs need, and it only
         // means something for a remote server.
         None => match source.config.server.transport {
-            TransportKind::StreamableHttp => vec!["auth".to_owned()],
+            TransportKind::StreamableHttp | TransportKind::LegacySse => vec!["auth".to_owned()],
             TransportKind::Stdio => Vec::new(),
         },
     };
@@ -422,7 +422,7 @@ fn packaged_config_yaml(
             display_name: &server.display_name,
             transport: server.transport.as_str(),
             endpoint: match server.transport {
-                TransportKind::StreamableHttp => server.endpoint.as_deref(),
+                TransportKind::StreamableHttp | TransportKind::LegacySse => server.endpoint.as_deref(),
                 TransportKind::Stdio => None,
             },
             stdio: match server.transport {
@@ -430,7 +430,7 @@ fn packaged_config_yaml(
                     command: stdio.command.as_deref(),
                     args: &stdio.args,
                 }),
-                TransportKind::StreamableHttp => None,
+                TransportKind::StreamableHttp | TransportKind::LegacySse => None,
             },
             protocol_version: server.protocol_version.as_deref(),
         },
